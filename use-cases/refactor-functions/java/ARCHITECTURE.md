@@ -1,0 +1,496 @@
+# Function Decomposition Challenge - Architecture and Design
+
+## System Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                           │
+│                    CustomerProcessorRefactored (Main Orchestrator)       │
+│                                                                           │
+│  Coordinates:                                                            │
+│  1. Input validation                                                     │
+│  2. Deduplication setup                                                  │
+│  3. Record processing                                                    │
+│  4. Persistence                                                          │
+│  5. Report generation                                                    │
+│                                                                           │
+└────────────────────────────────────────┬────────────────────────────────┘
+                                         │
+                    ┌────────────────────┼────────────────────┐
+                    │                    │                    │
+        ┌───────────▼──────┐  ┌──────────▼────────┐  ┌──────────▼──────┐
+        │                  │  │                   │  │                 │
+        │ EmailValidator   │  │ PhoneValidator    │  │ RecordTransformer
+        │                  │  │                   │  │                 │
+        │ • Validates      │  │ • Validates       │  │ • CSV format    │
+        │   format         │  │   format          │  │ • API format    │
+        │ • Checks         │  │ • Checks          │  │ • Manual format │
+        │   duplicates     │  │   duplicates      │  │                 │
+        │ • Normalizes     │  │ • Normalizes      │  │                 │
+        │                  │  │ • Formats         │  │                 │
+        │                  │  │                   │  │                 │
+        └────────┬─────────┘  └───────┬───────────┘  └────────┬────────┘
+                 │                    │                       │
+        ┌────────▼──────┐    ┌────────▼──────┐    ┌──────────▼────────┐
+        │                │    │               │    │                   │
+        │EmailValidation │    │PhoneValidation│    │RecordValidation   │
+        │Result          │    │Result         │    │Result             │
+        │                │    │               │    │                   │
+        │• valid         │    │• valid        │    │• valid            │
+        │• duplicate     │    │• duplicate    │    │• duplicate        │
+        │• errors        │    │• errors       │    │• errors           │
+        │                │    │               │    │                   │
+        └────────────────┘    └───────────────┘    └───────────────────┘
+                                     │
+                                     ▼
+                        ┌────────────────────────┐
+                        │                        │
+                        │  ProcessingResult      │
+                        │                        │
+                        │  Aggregates:           │
+                        │  • validRecords        │
+                        │  • invalidRecords      │
+                        │  • duplicateRecords    │
+                        │  • errorCounts        │
+                        │  • Statistics         │
+                        │                        │
+                        └──────────┬─────────────┘
+                                   │
+                        ┌──────────▼──────────┐
+                        │                     │
+                        │CustomerRepository   │
+                        │                     │
+                        │ • Save records      │
+                        │ • Find existing     │
+                        │ • Check duplicates  │
+                        │                     │
+                        └─────────────────────┘
+```
+
+## Processing Flow Diagram
+
+```
+                              START
+                                │
+                                ▼
+                    ┌─────────────────────┐
+                    │ Input Validation    │
+                    │ (isValidInput)      │
+                    └──────────┬──────────┘
+                               │
+                        ┌──────▼──────┐
+                        │   Valid?    │
+                        └──┬──────┬───┘
+                      No  │      │  Yes
+                      ┌───▘      └────┐
+                      │               │
+                      ▼               ▼
+                  [ERROR]    ┌────────────────────┐
+                             │ Load Existing      │
+                             │ Customers (if      │
+                             │ dedup enabled)     │
+                             └────────┬───────────┘
+                                      │
+                                      ▼
+                             ┌────────────────────┐
+                             │ Process All Records│
+                             │                    │
+                             │ For each record:   │
+                             │ 1. Transform       │
+                             │ 2. Validate        │
+                             │ 3. Classify        │
+                             └────────┬───────────┘
+                                      │
+                        ┌─────────────┼─────────────┐
+                        │             │             │
+                    ┌───▼──┐    ┌───▼──┐    ┌──▼──┐
+                    │Valid │    │Invalid│    │Dup  │
+                    └───┬──┘    └───┬──┘    └──┬──┘
+                        │          │          │
+                    Add to      Add to      Add to
+                    validRecs   invalidRecs dupRecs
+                        │          │          │
+                        └─────────┬─┴──────────┘
+                                  │
+                                  ▼
+                          ┌───────────────┐
+                          │ Check Error   │
+                          │ Limit         │
+                          └───────┬───────┘
+                                  │
+                        ┌─────────▼──────────┐
+                        │  Limit Exceeded?   │
+                        └──┬──────────────┬──┘
+                       No │              │ Yes
+                          │              │
+                          ▼              ▼
+                    [CONTINUE]      [STOP PROCESSING]
+                          │              │
+                          └──────┬───────┘
+                                 │
+                      ┌──────────▼──────────┐
+                      │ Save to Database?   │
+                      └──┬───────────────┬──┘
+                     Yes│               │ No
+                        │               │
+                        ▼               │
+                   ┌─────────┐          │
+                   │ Persist │          │
+                   │ Records │          │
+                   └────┬────┘          │
+                        │               │
+                      Error? ───────────┤
+                        │               │
+                        ▼               ▼
+                    [ERROR]      ┌──────────────┐
+                                 │ Build Report │
+                                 └──────┬───────┘
+                                        │
+                                        ▼
+                                   [RETURN RESULT]
+```
+
+## Class Dependency Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       Main Processor                             │
+│           CustomerProcessorRefactored                            │
+└───────────────┬──────────────┬──────────────┬──────────────┬────┘
+                │              │              │              │
+      ┌─────────▼────┐ ┌───────▼────┐ ┌──────▼────┐ ┌──────▼────┐
+      │   Validation │ │ Validation │ │Transform  │ │Repository │
+      │   (Email)    │ │ (Phone)    │ │  (Records)│ │ (DB)      │
+      └──────┬───────┘ └────┬───────┘ └──────┬────┘ └──────┬────┘
+             │              │               │              │
+      ┌──────▼────┐  ┌──────▼────┐  ┌──────▼────┐  ┌──────▼────┐
+      │   Email   │  │   Phone   │  │   Record  │  │  Customer│
+      │ Validation│  │Validation │  │Transformer│  │  Entity  │
+      │  Result   │  │   Result  │  │           │  │          │
+      └───────────┘  └───────────┘  └───────────┘  └──────────┘
+             │              │               │              │
+             └──────────────┼───────────────┼──────────────┘
+                            │               │
+                    ┌───────▼───────┐  ┌────▼──────┐
+                    │Record Valid   │  │Processing │
+                    │ation Result   │  │   Result  │
+                    └───────────────┘  └───────────┘
+```
+
+## Data Flow Through Processing Pipeline
+
+```
+Input: List<Map<String, Object>>
+        │
+        ▼
+    ┌──────────────────────────┐
+    │  RecordTransformer       │
+    │  Apply source-specific   │
+    │  preprocessing           │
+    └──────────┬───────────────┘
+               │
+               ▼
+    ┌──────────────────────────┐
+    │  Email Validation        │
+    │  • Format check          │
+    │  • Deduplication         │
+    │  • Normalization         │
+    └──────────┬───────────────┘
+               │
+               ▼
+    ┌──────────────────────────┐
+    │  Phone Validation        │
+    │  • Format check          │
+    │  • Deduplication         │
+    │  • Normalization         │
+    └──────────┬───────────────┘
+               │
+               ▼
+    ┌──────────────────────────┐
+    │  Name Validation         │
+    │  • Required fields       │
+    │  • String trimming       │
+    └──────────┬───────────────┘
+               │
+               ▼
+    ┌──────────────────────────┐
+    │  Classification          │
+    │  • Valid                 │
+    │  • Invalid               │
+    │  • Duplicate             │
+    └──────────┬───────────────┘
+               │
+               ▼
+         ProcessingResult
+        (Aggregated data)
+               │
+               ▼
+         Database Persistence
+        (If enabled)
+               │
+               ▼
+         Result Report Generation
+               │
+               ▼
+    Output: Map<String, Object>
+```
+
+## Validation Decision Tree
+
+```
+                        Record
+                          │
+                    ┌─────▼─────┐
+                    │  Transform │
+                    │ by Source  │
+                    └─────┬─────┘
+                          │
+                    ┌─────▼──────────────┐
+                    │ Email Validation   │
+                    └─────┬───────┬──────┘
+                     Valid│       │Invalid
+                          │       │
+                         ┌▼──┐   ┌┴──┐
+                         │OK │   │ERR│
+                         └┬──┘   └───┘
+                    ┌─────▼──────────────┐
+                    │ Phone Validation   │
+                    │ (Optional)         │
+                    └─────┬───────┬──────┘
+                     Valid│       │Invalid
+                          │       │
+                         ┌▼──┐   ┌┴──┐
+                         │OK │   │ERR│
+                         └┬──┘   └───┘
+                    ┌─────▼──────────────┐
+                    │ Name Validation    │
+                    │ (Required)         │
+                    └─────┬───────┬──────┘
+                     Valid│       │Invalid
+                          │       │
+                         ┌▼──┐   ┌┴──┐
+                         │OK │   │ERR│
+                         └┬──┘   └───┘
+                          │
+                    ┌─────▼──────────────┐
+                    │  Check Duplicates  │
+                    └─────┬───────┬──────┘
+                 Unique│          │Duplicate
+                       │          │
+                      ┌▼─┐    ┌───┴────┐
+                      │✓ │    │Treat as│
+                      │  │    │Error?  │
+                      └──┘    └┬──────┬┘
+                            Yes│     │No
+                              │     │
+                             ┌▼┐   ┌┴┐
+                             │E│   │S│
+                             └─┘   └─┘
+                                    │
+                        ┌───────────▼────────┐
+                        │ VALID RECORD       │
+                        │ (Add to valid list)│
+                        └────────────────────┘
+```
+
+## Error Handling Flow
+
+```
+Processing a Record
+        │
+        ▼
+    ┌─────────────────┐
+    │ Try to Process  │
+    │ and Validate    │
+    └────┬──────┬─────┘
+         │      │
+     Success  Exception
+         │       │
+         │   ┌───▼─────────────┐
+         │   │ Log Error       │
+         │   │ Record Exception│
+         │   └───┬─────────────┘
+         │       │
+    ┌────▼───────▼──────────┐
+    │ Add to InvalidRecords │
+    │ with Error Info       │
+    └────────┬──────────────┘
+             │
+    ┌────────▼────────────────┐
+    │ Increment Error Count   │
+    └────────┬────────────────┘
+             │
+    ┌────────▼──────────────────────┐
+    │ Check if Limit Reached        │
+    └────┬──────────────┬───────────┘
+   No   │              │  Yes
+       │               │
+       ▼               ▼
+    Continue      Stop & Return Error
+    Processing
+```
+
+## Test Coverage Map
+
+```
+┌────────────────────────────────────────────────────────┐
+│             Test Coverage Overview                     │
+├────────────────────────────────────────────────────────┤
+│                                                        │
+│  EmailValidator (8 tests)                             │
+│  ├─ Valid format (1)                                  │
+│  ├─ Invalid format (1)                                │
+│  ├─ Missing email (1)                                 │
+│  ├─ Duplicate detection (2)                           │
+│  ├─ Normalization (2)                                 │
+│  └─ Trimming (1)                                      │
+│                                                        │
+│  PhoneValidator (7 tests)                             │
+│  ├─ Valid format (1)                                  │
+│  ├─ International format (1)                          │
+│  ├─ Invalid format (1)                                │
+│  ├─ Optional field (1)                                │
+│  ├─ Duplicate detection (2)                           │
+│  └─ Normalization (1)                                 │
+│                                                        │
+│  CustomerProcessorRefactored (11 tests)               │
+│  ├─ Input validation (2)                              │
+│  ├─ Record processing (2)                             │
+│  ├─ Duplicate detection (1)                           │
+│  ├─ Database integration (2)                          │
+│  ├─ Error handling (1)                                │
+│  ├─ Thresholds (1)                                    │
+│  └─ Statistics (2)                                    │
+│                                                        │
+│  Total: 26 tests, ~95% coverage                       │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
+
+## Responsibility Matrix
+
+```
+┌────────────────────┬─────┬─────┬──────┬─────┐
+│ Responsibility     │ CP  │ EV  │ PV  │ RT  │
+├────────────────────┼─────┼─────┼──────┼─────┤
+│ Orchestration      │ ✓   │ -   │ -    │ -   │
+│ Input validation   │ ✓   │ -   │ -    │ -   │
+│ Email validation   │ -   │ ✓   │ -    │ -   │
+│ Phone validation   │ -   │ -   │ ✓    │ -   │
+│ Record transform   │ -   │ -   │ -    │ ✓   │
+│ Error aggregation  │ ✓   │ -   │ -    │ -   │
+│ Database persist   │ ✓   │ -   │ -    │ -   │
+│ Report generation  │ ✓   │ -   │ -    │ -   │
+└────────────────────┴─────┴─────┴──────┴─────┘
+
+Legend:
+CP  = CustomerProcessorRefactored
+EV  = EmailValidator
+PV  = PhoneValidator
+RT  = RecordTransformer
+✓   = Primary responsibility
+-   = Not involved
+```
+
+## Class Hierarchy and Relationships
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Result Classes                        │
+│                  (Value Objects)                        │
+└──────┬──────────────────────┬──────────────────────┬────┘
+       │                      │                      │
+       ▼                      ▼                      ▼
+┌────────────┐    ┌───────────────────┐   ┌─────────────┐
+│EmailValidat│    │RecordValidation   │   │PhoneValidat │
+│ionResult   │    │Result             │   │ionResult    │
+├────────────┤    ├───────────────────┤   ├─────────────┤
+│- valid     │    │- valid            │   │- valid      │
+│- duplicate │    │- duplicate        │   │- duplicate  │
+│- errors    │    │- errors           │   │- errors     │
+└────────────┘    └───────────────────┘   └─────────────┘
+
+
+┌─────────────────────────────────────────────────────────┐
+│              Validator Classes                          │
+│        (Single Responsibility)                          │
+└────────────────┬─────────────────────────────────────┬──┘
+                 │                                     │
+                 ▼                                     ▼
+         ┌────────────────┐              ┌──────────────────┐
+         │ EmailValidator │              │  PhoneValidator  │
+         ├────────────────┤              ├──────────────────┤
+         │+ validate()    │              │+ validate()      │
+         │- isValidFormat │              │- isValidFormat   │
+         │- isDuplicate   │              │- isDuplicate     │
+         │- isEmpty       │              │- isEmpty         │
+         │                │              │+ normalize()     │
+         │                │              │- format()        │
+         └────────────────┘              └──────────────────┘
+
+
+┌─────────────────────────────────────────────────────────┐
+│              Transformation                             │
+└────────────────────────────┬──────────────────────────┬─┘
+                             │
+                             ▼
+                  ┌──────────────────────┐
+                  │  RecordTransformer   │
+                  ├──────────────────────┤
+                  │+ transform()         │
+                  │- transformCsvRecord  │
+                  │- transformApiRecord  │
+                  │- transformManualRec  │
+                  └──────────────────────┘
+
+
+┌─────────────────────────────────────────────────────────┐
+│         Aggregation & Persistence                       │
+└────────────────┬─────────────────────────────────────┬──┘
+                 │                                     │
+                 ▼                                     ▼
+        ┌──────────────────┐           ┌──────────────────┐
+        │ProcessingResult  │           │CustomerRepository│
+        ├──────────────────┤           ├──────────────────┤
+        │- validRecords    │           │+ findAll()       │
+        │- invalidRecords  │           │+ save()          │
+        │- duplicateRecords│           │+ saveAll()       │
+        │- errorCounts    │           │+ findByEmail()   │
+        │                 │           │+ existsByEmail() │
+        │+ addValidRecord()│           │+ existsByPhone() │
+        │+ addInvalidRec() │           └──────────────────┘
+        │+ addDuplicateRec│
+        │+ getters...     │
+        └──────────────────┘
+
+
+┌─────────────────────────────────────────────────────────┐
+│       Main Orchestrator & Configuration                 │
+└────────────────┬──────────────────────────────────────┬─┘
+                 │                                      │
+                 ▼                                      ▼
+  ┌──────────────────────────┐     ┌──────────────────────┐
+  │CustomerProcessorRefactored│     │CustomerProcessing   │
+  ├──────────────────────────┤     │Options              │
+  │+ processCustomerData()   │     ├──────────────────────┤
+  │- processAllRecords()     │     │- performDeduplication
+  │- processIndividualRec()  │     │- duplicatesAreErrors │
+  │- validateRecord()        │     │- maxErrorCount       │
+  │- validateNames()         │     │- saveToDatabase      │
+  │- persistValidRecords()   │     │+ builder()           │
+  │- buildProcessingReport() │     │+ with...() methods   │
+  │- loadExisting...()       │     └──────────────────────┘
+  │- createErrorResult()     │
+  │- mapToCustomerEntity()   │
+  └──────────────────────────┘
+```
+
+---
+
+This architecture diagram shows:
+1. **Clear separation of concerns** - Each class has specific responsibilities
+2. **Layered design** - Input → Validation → Transformation → Output
+3. **Dependency flow** - Main processor depends on validators and transformers
+4. **Result encapsulation** - Results are value objects passed between components
+5. **Single responsibility** - Each validator/transformer handles one domain
+
